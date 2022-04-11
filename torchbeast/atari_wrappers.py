@@ -302,9 +302,9 @@ class LazyFrames(object):
         return self._force()[..., i]
 
 
-def make_atari(env_id, max_episode_steps=None, full_action_space=False):
-    env = gym.make(env_id, full_action_space=full_action_space)
-    assert 'NoFrameskip' in env.spec.id
+def make_atari(env_id, max_episode_steps=None, config={'full_action_space' :False}):
+    env = gym.make(env_id, **config)
+    assert 'NoFrameskip' in env.spec.id or getattr(env.unwrapped, "_frameskip", 1) == 1
     env = NoopResetEnv(env, noop_max=30)
     env = MaxAndSkipEnv(env, skip=4)
 

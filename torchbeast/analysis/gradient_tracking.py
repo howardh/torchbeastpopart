@@ -69,6 +69,8 @@ class GradientTracker:
     def process_backward_pass(self, named_parameters, verbose=False):
         current_grad = []
         for n, p in named_parameters:
+            if p.grad is None:
+                continue
             if p.requires_grad and "bias" not in n:
                 current_grad.append([n])
 

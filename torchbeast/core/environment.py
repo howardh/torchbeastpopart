@@ -46,7 +46,7 @@ class Environment:
         )
 
     def step(self, action):
-        frame, reward, done, task, unused_info = self.gym_env.step(action.item())
+        frame, reward, done, task, _ = self.gym_env.step(action.item())
         self.episode_step += 1
         self.episode_return += reward
         episode_step = self.episode_step
@@ -72,7 +72,7 @@ class Environment:
         )
 
     def step_no_task(self, action):
-        frame, reward, done, unused_info = self.gym_env.step(action.item())
+        frame, reward, done, _ = self.gym_env.step(action.item())
         self.episode_step += 1
         self.episode_return += reward
         episode_step = self.episode_step

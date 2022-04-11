@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import argparse
+from collections import OrderedDict
 import logging
 import os
 import re
@@ -24,6 +25,8 @@ import traceback
 import typing
 
 os.environ["OMP_NUM_THREADS"] = "1"  # Necessary for multithreading.
+
+#import wandb
 
 import torch
 from torch import multiprocessing as mp
@@ -39,6 +42,7 @@ from torchbeast.core import vtrace
 from torchbeast.models.attention_augmented_agent import AttentionAugmentedAgent
 from torchbeast.models.resnet_monobeast import ResNet
 from torchbeast.models.atari_net_monobeast import AtariNet
+from torchbeast.models.custom import MonobeastMP2
 
 from torchbeast.analysis.gradient_tracking import GradientTracker
 
@@ -48,6 +52,10 @@ parser = argparse.ArgumentParser(description="PyTorch Scalable Agent")
 
 parser.add_argument("--env", type=str, default="PongNoFrameskip-v4",
                     help="Gym environment.")
+parser.add_argument("--atari-mode", type=int, default=None,
+                    help="Mode of the Atari environment.")
+parser.add_argument("--atari-difficulty", type=int, default=None,
+                    help="Difficulty of the Atari environment.")
 parser.add_argument("--mode", default="train",
                     choices=["train", "test", "test_render"],
                     help="Training or test mode.")
@@ -128,6 +136,7 @@ parser.add_argument("--actions",
 
 # yapf: enable
 
+#wandb.init(project="monobeast")
 
 logging.basicConfig(format="[%(levelname)s:%(process)d %(module)s:%(lineno)d %(asctime)s] " "%(message)s", level=0)
 logging.getLogger("matplotlib.font_manager").disabled = True
@@ -162,7 +171,7 @@ def compute_policy_gradient_loss(logits, actions, advantages):
 
 def act(
     flags,
-    env: str,
+    env_name: str,
     task: int,
     full_action_space: bool,
     actor_index: int,
@@ -178,9 +187,9 @@ def act(
 
         # create the environment from command line parameters
         # => could also create a special one which operates on a list of games (which we need)
-        gym_env = create_env(env, frame_height=flags.frame_height, frame_width=flags.frame_width,
+        gym_env = create_env(env_name, frame_height=flags.frame_height, frame_width=flags.frame_width,
                              gray_scale=(flags.aaa_input_format == "gray_stack"),
-                             full_action_space=full_action_space, task=task)
+                             config={'full_action_space': full_action_space}, task=task)
 
         # generate a seed for the environment (NO HUMAN STARTS HERE!), could just
         # use this for all games wrapped by the environment for our application
@@ -395,6 +404,8 @@ def learn(
         actor_model.load_state_dict(model.state_dict())
 
         # get the returns only for finished episodes (where the game was played to completion)
+        if batch['done'].any():
+            pprint.pprint([(envs[i],r) for i,r in zip(batch['task'][batch['done']],batch["episode_return"][batch["done"]])])
         episode_returns = batch["episode_return"][batch["done"]]
         stats["step"] = stats.get("step", 0) + flags.unroll_length * flags.batch_size
         stats["episode_returns"] = tuple(episode_returns.cpu().numpy())
@@ -486,6 +497,9 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
     elif flags.agent_type.lower() in ["rn", "res", "resnet", "res_net"]:
         Net = ResNet
         logging.info("Using the ResNet architecture (monobeast version).")
+    elif flags.agent_type.lower() in ["custom"]:
+        Net = MonobeastMP2
+        logging.info("Using custom model.")
     else:
         Net = AtariNet
         logging.warning("No valid agent type specified. Using the default agent.")
@@ -771,11 +785,16 @@ def test(flags):
         full_action_space = True
 
     # create the environment
+    env_config = { 'full_action_space': full_action_space }
+    if flags.atari_mode is not None:
+        env_config['mode'] = flags.atari_mode
+    if flags.atari_difficulty is not None:
+        env_config['difficulty'] = flags.atari_difficulty
     gym_env = create_env(flags.env,
                          frame_height=frame_height,
                          frame_width=frame_width,
                          gray_scale=(agent_type != "aaa" or aaa_input_format == "gray_stack"),
-                         full_action_space=full_action_space)
+                         config=env_config)
     env = environment.Environment(gym_env)
 
     # create the model and load its parameters
@@ -791,7 +810,8 @@ def test(flags):
     if 'baseline.mu' not in checkpoint["model_state_dict"]:
         checkpoint["model_state_dict"]["baseline.mu"] = torch.zeros(1)
         checkpoint["model_state_dict"]["baseline.sigma"] = torch.ones(1)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    to_ignore = ['baseline.weight', 'baseline.bias', 'baseline.mu','baseline.sigma'] # The size of these tensors depend on the number of environments
+    model.load_state_dict(OrderedDict((k,v) for k,v in checkpoint["model_state_dict"].items() if k not in to_ignore), strict=False)
 
     observation = env.initial()
     returns = []
@@ -813,10 +833,13 @@ def test(flags):
     logging.info("Average returns over %i steps: %.1f", flags.num_episodes, sum(returns) / len(returns))
 
 
-def create_env(env, frame_height=84, frame_width=84, gray_scale=True, full_action_space=False, task=0):
+def create_env(env, frame_height=84, frame_width=84, gray_scale=True, config={'full_action_space':False}, task=0):
     return atari_wrappers.wrap_pytorch_task(
         atari_wrappers.wrap_deepmind(
-            atari_wrappers.make_atari(env, full_action_space=full_action_space),
+            atari_wrappers.make_atari(env, config={
+                'frameskip': 1,
+                **config,
+            }),
             clip_rewards=False,
             frame_stack=True,
             frame_height=frame_height,
