@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import argparse
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 import logging
 import os
 import re
@@ -25,8 +25,6 @@ import traceback
 import typing
 
 os.environ["OMP_NUM_THREADS"] = "1"  # Necessary for multithreading.
-
-#import wandb
 
 import torch
 from torch import multiprocessing as mp
@@ -46,6 +44,7 @@ from torchbeast.models.custom import MonobeastMP2
 
 from torchbeast.analysis.gradient_tracking import GradientTracker
 
+import wandb
 
 # yapf: disable
 parser = argparse.ArgumentParser(description="PyTorch Scalable Agent")
@@ -127,6 +126,8 @@ parser.add_argument("--save_model_every_nsteps", default=0, type=int,
                     help="Save model every n steps")
 parser.add_argument("--beta", default=0.0001, type=float,
                     help="PopArt parameter")
+parser.add_argument("--wandb", action="store_true",
+                    help="Track the experiment on W&B")
 
 # Test settings.
 parser.add_argument("--num_episodes", default=100, type=int,
@@ -135,8 +136,6 @@ parser.add_argument("--actions",
                     help="Use given action sequence.")
 
 # yapf: enable
-
-#wandb.init(project="monobeast")
 
 logging.basicConfig(format="[%(levelname)s:%(process)d %(module)s:%(lineno)d %(asctime)s] " "%(message)s", level=0)
 logging.getLogger("matplotlib.font_manager").disabled = True
@@ -405,7 +404,19 @@ def learn(
 
         # get the returns only for finished episodes (where the game was played to completion)
         if batch['done'].any():
-            pprint.pprint([(envs[i],r) for i,r in zip(batch['task'][batch['done']],batch["episode_return"][batch["done"]])])
+            returns_by_game = defaultdict(lambda: [])
+            for i,r in zip(batch['task'][batch['done']],batch["episode_return"][batch["done"]]):
+                returns_by_game[envs[i]].append(r)
+            pprint.pprint(dict(returns_by_game))
+            if flags.wandb:
+                wandb.log({
+                    **{f'returns/{k}': torch.stack(v).mean().item() for k,v in returns_by_game.items()},
+                    **{f'mu/{k}': mu[0, 0, i].item() for i,k in enumerate(envs)},
+                    'loss/pg': pg_loss.item(),
+                    'loss/baseline': baseline_loss.item(),
+                    'loss/entropy': entropy_loss.item(),
+                    'loss/total': total_loss.item(),
+                }, step=stats['step'])
         episode_returns = batch["episode_return"][batch["done"]]
         stats["step"] = stats.get("step", 0) + flags.unroll_length * flags.batch_size
         stats["episode_returns"] = tuple(episode_returns.cpu().numpy())
@@ -687,6 +698,9 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
             },
             save_model_path,
         )
+
+    if flags.wandb:
+        wandb.init(project="monobeast")
 
     timer = timeit.default_timer
     try:
