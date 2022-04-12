@@ -407,16 +407,20 @@ def learn(
             returns_by_game = defaultdict(lambda: [])
             for i,r in zip(batch['task'][batch['done']],batch["episode_return"][batch["done"]]):
                 returns_by_game[envs[i]].append(r)
-            pprint.pprint(dict(returns_by_game))
+            logging.info("returns by game:")
+            logging.info(pprint.pformat(dict(returns_by_game)))
             if flags.wandb:
-                wandb.log({
-                    **{f'returns/{k}': torch.stack(v).mean().item() for k,v in returns_by_game.items()},
-                    **{f'mu/{k}': mu[0, 0, i].item() for i,k in enumerate(envs)},
-                    'loss/pg': pg_loss.item(),
-                    'loss/baseline': baseline_loss.item(),
-                    'loss/entropy': entropy_loss.item(),
-                    'loss/total': total_loss.item(),
-                }, step=stats['step'])
+                try:
+                    wandb.log({
+                        **{f'returns/{k}': torch.stack(v).mean().item() for k,v in returns_by_game.items()},
+                        **{f'mu/{k}': mu[0, 0, i].item() for i,k in enumerate(envs)},
+                        'loss/pg': pg_loss.item(),
+                        'loss/baseline': baseline_loss.item(),
+                        'loss/entropy': entropy_loss.item(),
+                        'loss/total': total_loss.item(),
+                    }, step=stats['step'])
+                except:
+                    pass
         episode_returns = batch["episode_return"][batch["done"]]
         stats["step"] = stats.get("step", 0) + flags.unroll_length * flags.batch_size
         stats["episode_returns"] = tuple(episode_returns.cpu().numpy())
@@ -602,18 +606,7 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    # Load state from a checkpoint, if possible.
-    if os.path.exists(checkpointpath):
-        checkpoint_states = torch.load(checkpointpath, map_location=flags.device)
-        learner_model.load_state_dict(checkpoint_states["model_state_dict"])
-        optimizer.load_state_dict(checkpoint_states["optimizer_state_dict"])
-        scheduler.load_state_dict(checkpoint_states["scheduler_state_dict"])
-        # stats = checkpoint_states["stats"]
-        # logging.info(f"Resuming preempted job, current stats:\n{stats}")
-
-    # Initialize actor model like learner model.
-    model.load_state_dict(learner_model.state_dict())
-
+    # Logger
     logger = logging.getLogger("logfile")
     stat_keys = [
         "total_loss",
@@ -629,6 +622,18 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
     logger.info("# Step\t%s", "\t".join(stat_keys))
 
     step, stats = 0, {}
+
+    # Load state from a checkpoint, if possible.
+    if os.path.exists(checkpointpath):
+        checkpoint_states = torch.load(checkpointpath, map_location=flags.device)
+        learner_model.load_state_dict(checkpoint_states["model_state_dict"])
+        optimizer.load_state_dict(checkpoint_states["optimizer_state_dict"])
+        scheduler.load_state_dict(checkpoint_states["scheduler_state_dict"])
+        stats = checkpoint_states["stats"]
+        logging.info(f"Resuming preempted job, current stats:\n{stats}")
+
+    # Initialize actor model like learner model.
+    model.load_state_dict(learner_model.state_dict())
 
     def batch_and_learn(i, lock=threading.Lock()):
         """Thread target for the learning process."""
@@ -700,7 +705,7 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
         )
 
     if flags.wandb:
-        wandb.init(project="monobeast")
+        wandb.init(project="monobeast", config=flags)
 
     timer = timeit.default_timer
     try:
