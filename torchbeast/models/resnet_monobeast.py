@@ -87,7 +87,7 @@ class ResNet(nn.Module):
             for _ in range(2)
         )
 
-    def forward(self, inputs, core_state=(), run_to_conv=-1):
+    def forward(self, inputs, core_state=(), run_to_conv=-1, stochastic=False):
         if run_to_conv >= 0:
             x = inputs
         else:
@@ -150,7 +150,7 @@ class ResNet(nn.Module):
         policy_logits = self.policy(core_output)
         baseline, normalized_baseline = self.baseline(core_output)
 
-        if self.training:
+        if self.training or stochastic:
             action = torch.multinomial(F.softmax(policy_logits, dim=1), num_samples=1)
         else:
             # Don't sample when testing.

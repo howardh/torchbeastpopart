@@ -70,7 +70,7 @@ class MonobeastMP2(torch.nn.Module):
         )
         self.baseline = PopArtLayer(baseline_output_size, num_tasks if use_popart else 1)
 
-    def forward(self, inputs, core_state, run_to_conv=-1):
+    def forward(self, inputs, core_state, run_to_conv=-1, stochastic=False):
         if run_to_conv >= 0:
             x = inputs
         else:
@@ -101,7 +101,7 @@ class MonobeastMP2(torch.nn.Module):
 
         baseline, normalized_baseline = self.baseline(output['baseline'].view(T * B, -1)) # type: ignore
 
-        if self.training:
+        if self.training or stochastic:
             action = torch.multinomial(F.softmax(output['policy_logits'].view(T * B, -1), dim=1), num_samples=1) # type: ignore
         else:
             # Don't sample when testing.

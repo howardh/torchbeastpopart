@@ -26,6 +26,7 @@ import typing
 
 os.environ["OMP_NUM_THREADS"] = "1"  # Necessary for multithreading.
 
+import shelve
 import torch
 from torch import multiprocessing as mp
 from torch import nn
@@ -45,6 +46,7 @@ from torchbeast.models.custom import MonobeastMP2
 from torchbeast.analysis.gradient_tracking import GradientTracker
 
 import wandb
+import wandb.util
 
 # yapf: disable
 parser = argparse.ArgumentParser(description="PyTorch Scalable Agent")
@@ -134,6 +136,10 @@ parser.add_argument("--num_episodes", default=100, type=int,
                     help="Number of episodes for Testing.")
 parser.add_argument("--actions",
                     help="Use given action sequence.")
+parser.add_argument("--stochastic", action="store_true",
+                    help="Sample actions according to the predicted distribution rather than taking the greedy action.")
+parser.add_argument("--test_results_shelve", default=None, type=str,
+                    help="File to save test results to")
 
 # yapf: enable
 
@@ -418,7 +424,9 @@ def learn(
                         'loss/baseline': baseline_loss.item(),
                         'loss/entropy': entropy_loss.item(),
                         'loss/total': total_loss.item(),
-                    }, step=stats['step'])
+                        'transition_steps': stats['step'],
+                        **{f'env_step/{k}': v for k,v in stats['env_step'].items()},
+                    })
                 except:
                     pass
         episode_returns = batch["episode_return"][batch["done"]]
@@ -675,6 +683,16 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
         thread.start()
         threads.append(thread)
 
+    # W&B
+    if flags.wandb:
+        wandb_run_id = None
+        slurm_job_id = os.environ.get('SLURM_JOB_ID')
+        if slurm_job_id is not None:
+            wandb_run_id = f'mila-slurm-{slurm_job_id}'
+        else:
+            wandb_run_id = wandb.util.generate_id()
+        wandb.init(project="monobeast", resume='allow', id=wandb_run_id, config=flags)
+
     def save_latest_model():
         if flags.disable_checkpoint:
             return
@@ -703,9 +721,6 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
             },
             save_model_path,
         )
-
-    if flags.wandb:
-        wandb.init(project="monobeast", config=flags)
 
     timer = timeit.default_timer
     try:
@@ -767,8 +782,26 @@ def test(flags):
     else:
         checkpointpath = os.path.expandvars(os.path.expanduser("%s/%s/%s" % (flags.savedir, flags.xpid, "model.tar")))
 
+    print('')
+    print('+'+'-'*80)
+    print('|  Testing')
+    print(f'|  {checkpointpath}')
+    print('+'+'-'*80)
+
     if len(flags.env.split(",")) != 1:
         raise Exception("Only one environment allowed for testing")
+
+    if flags.test_results_shelve is not None:
+        results = shelve.open(flags.test_results_shelve)
+    else:
+        results = {}
+
+    if checkpointpath not in results:
+        results[checkpointpath] = []
+
+    print(f'{len(results[checkpointpath])} results already stored')
+    if len(results[checkpointpath]) >= flags.num_episodes:
+        return
 
     # load the original arguments for the loaded network
     flags_orig = file_writer.read_metadata(
@@ -833,13 +866,14 @@ def test(flags):
     model.load_state_dict(OrderedDict((k,v) for k,v in checkpoint["model_state_dict"].items() if k not in to_ignore), strict=False)
 
     observation = env.initial()
-    returns = []
+    core_state = model.initial_state(1)
+    returns = results[checkpointpath]
     while len(returns) < flags.num_episodes:
         if flags.mode == "test_render":
             time.sleep(0.05)
             env.gym_env.render()
-        agent_outputs = model(observation)
-        policy_outputs, _ = agent_outputs
+        agent_outputs = model(observation, core_state, stochastic=flags.stochastic)
+        policy_outputs, core_state = agent_outputs
         observation = env.step(policy_outputs["action"])
         if observation["done"].item():
             returns.append(observation["episode_return"].item())
@@ -851,6 +885,10 @@ def test(flags):
     env.close()
     logging.info("Average returns over %i steps: %.1f", flags.num_episodes, sum(returns) / len(returns))
 
+    # Save results
+    if isinstance(results, shelve.Shelf):
+        results[checkpointpath] = returns
+        results.close()
 
 def create_env(env, frame_height=84, frame_width=84, gray_scale=True, config={'full_action_space':False}, task=0):
     return atari_wrappers.wrap_pytorch_task(
