@@ -27,6 +27,8 @@ import typing
 os.environ["OMP_NUM_THREADS"] = "1"  # Necessary for multithreading.
 
 import shelve
+import orion
+import orion.client
 import torch
 from torch import multiprocessing as mp
 from torch import nn
@@ -57,6 +59,8 @@ parser.add_argument("--atari-mode", type=int, default=None,
                     help="Mode of the Atari environment.")
 parser.add_argument("--atari-difficulty", type=int, default=None,
                     help="Difficulty of the Atari environment.")
+parser.add_argument("--atari-action-repeat", type=float, default=None,
+                    help="Probability of action repeat in the Atari environment.")
 parser.add_argument("--mode", default="train",
                     choices=["train", "test", "test_render"],
                     help="Training or test mode.")
@@ -138,8 +142,8 @@ parser.add_argument("--actions",
                     help="Use given action sequence.")
 parser.add_argument("--stochastic", action="store_true",
                     help="Sample actions according to the predicted distribution rather than taking the greedy action.")
-parser.add_argument("--test_results_shelve", default=None, type=str,
-                    help="File to save test results to")
+parser.add_argument("--test_results_path", default=None, type=str,
+                    help="File/directory to save test results to")
 
 # yapf: enable
 
@@ -192,9 +196,17 @@ def act(
 
         # create the environment from command line parameters
         # => could also create a special one which operates on a list of games (which we need)
+        env_config = { 'full_action_space': full_action_space }
+        if flags.atari_mode is not None:
+            env_config['mode'] = flags.atari_mode
+        if flags.atari_difficulty is not None:
+            env_config['difficulty'] = flags.atari_difficulty
+        if flags.atari_action_repeat is not None:
+            env_config['repeat_action_probability'] = flags.atari_action_repeat
         gym_env = create_env(env_name, frame_height=flags.frame_height, frame_width=flags.frame_width,
                              gray_scale=(flags.aaa_input_format == "gray_stack"),
-                             config={'full_action_space': full_action_space}, task=task)
+                             config={ 'full_action_space': full_action_space, **env_config },
+                             task=task)
 
         # generate a seed for the environment (NO HUMAN STARTS HERE!), could just
         # use this for all games wrapped by the environment for our application
@@ -411,14 +423,16 @@ def learn(
         # get the returns only for finished episodes (where the game was played to completion)
         if batch['done'].any():
             returns_by_game = defaultdict(lambda: [])
+            stats["returns_by_game"] = stats.get("returns_by_game", {})
             for i,r in zip(batch['task'][batch['done']],batch["episode_return"][batch["done"]]):
-                returns_by_game[envs[i]].append(r)
+                returns_by_game[envs[i]].append(r.item())
+                stats["returns_by_game"][envs[i]] = stats["returns_by_game"].get(envs[i], [])[:9] + [r.item()]
             logging.info("returns by game:")
             logging.info(pprint.pformat(dict(returns_by_game)))
             if flags.wandb:
                 try:
                     wandb.log({
-                        **{f'returns/{k}': torch.stack(v).mean().item() for k,v in returns_by_game.items()},
+                        **{f'returns/{k}': torch.tensor(v).mean().item() for k,v in returns_by_game.items()},
                         **{f'mu/{k}': mu[0, 0, i].item() for i,k in enumerate(envs)},
                         'loss/pg': pg_loss.item(),
                         'loss/baseline': baseline_loss.item(),
@@ -702,6 +716,7 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
                 "model_state_dict": learner_model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
+                "stats": stats,
                 "flags": vars(flags),
             },
             checkpointpath,
@@ -722,6 +737,7 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
             save_model_path,
         )
 
+    returns_by_game = {}
     timer = timeit.default_timer
     try:
         last_checkpoint_time = timer()
@@ -754,8 +770,14 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
                 sps,
                 total_loss,
                 mean_return,
-                pprint.pformat(stats),
+                pprint.pformat({k:v for k,v in stats.items() if k not in ["returns_by_game"]}),
             )
+            # Check stats for any finished episodes
+        orion.client.report_results(data=[
+                {'name': k, 'type': 'statistic', 'value': sum(v)/len(v)}
+                for k,v in stats['returns_by_game'].items()
+            ]+[{'name': 'dummy_objective', 'type': 'objective', 'value': 0}]
+        )
     except KeyboardInterrupt:
         gradient_tracker.print_total()
         return  # Try joining actors then quit.
@@ -769,7 +791,6 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
         for actor in actor_processes:
             actor.join(timeout=10)
         gradient_tracker.print_total()
-
     save_latest_model()
     plogger.close()
 
@@ -791,7 +812,7 @@ def test(flags):
     if len(flags.env.split(",")) != 1:
         raise Exception("Only one environment allowed for testing")
 
-    if flags.test_results_shelve is not None:
+    if flags.test_results_path is not None:
         results = shelve.open(flags.test_results_shelve)
     else:
         results = {}
@@ -842,6 +863,8 @@ def test(flags):
         env_config['mode'] = flags.atari_mode
     if flags.atari_difficulty is not None:
         env_config['difficulty'] = flags.atari_difficulty
+    if flags.atari_action_repeat is not None:
+        env_config['repeat_action_probability'] = flags.atari_action_repeat
     gym_env = create_env(flags.env,
                          frame_height=frame_height,
                          frame_width=frame_width,
@@ -890,12 +913,27 @@ def test(flags):
         results[checkpointpath] = returns
         results.close()
 
+
 def create_env(env, frame_height=84, frame_width=84, gray_scale=True, config={'full_action_space':False}, task=0):
+    pattern = re.compile(r"^(.*-v(\d))(-m(\d)d(\d))?$")
+    m = pattern.match(env)
+    if m is None:
+        raise Exception("Could not parse environment name: %s" % env)
+    env_name = m.group(1)
+    if m.group(3) is not None:
+        env_config = {
+            'mode': int(m.group(4)),
+            'difficulty': int(m.group(5)),
+        }
+    else:
+        env_config = {}
+
     return atari_wrappers.wrap_pytorch_task(
         atari_wrappers.wrap_deepmind(
-            atari_wrappers.make_atari(env, config={
+            atari_wrappers.make_atari(env_name, config={
                 'frameskip': 1,
                 **config,
+                **env_config,
             }),
             clip_rewards=False,
             frame_stack=True,
