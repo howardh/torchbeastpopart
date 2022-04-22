@@ -13,6 +13,10 @@ parser = argparse.ArgumentParser(description="Plot results")
 #                    help="File that results were saved to")
 parser.add_argument("--test_results", type=str, required=True, nargs='+',
                     help="Directories that results were saved to")
+parser.add_argument("--labels", type=str, required=False, nargs='+',
+                    help="Labels for each curve. Must be the same length as --test_results")
+parser.add_argument("--title", type=str, required=False,
+                    help="Title for the plot")
 parser.add_argument("--output", type=str, required=True,
                     help="Output file")
 parser.add_argument("--scatter", action="store_true",
@@ -76,15 +80,20 @@ def main(flags):
     #    label = shelve_file.split('/')[-1].split('.')[0]
     #    plt.scatter(*data['scatter'], alpha=0.1)
     #    plt.plot(*data['plot'], label=label)
-    for directory in flags.test_results:
+    for i,directory in enumerate(flags.test_results):
         data = get_data_from_pickles(directory)
-        label = directory.split('/')[-1]
+        if flags.labels is not None:
+            label = flags.labels[i]
+        else:
+            label = directory.split('/')[-1]
         if flags.scatter:
             plt.scatter(*data['scatter'], alpha=0.1)
         plt.plot(data['plot'][0], ema_smooth(data['plot'][1]), label=label)
 
     plt.xlabel('Steps')
     plt.ylabel('Return')
+    if flags.title is not None:
+        plt.title(flags.title)
     plt.legend()
     plt.grid()
 

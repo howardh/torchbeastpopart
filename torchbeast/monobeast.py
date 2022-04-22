@@ -1,3 +1,5 @@
+#!/home/ml/users/hhuang63/rl/ENV/bin/python
+
 # Copyright (c) Facebook, Inc. and its affiliates.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -132,7 +134,9 @@ parser.add_argument("--save_model_every_nsteps", default=0, type=int,
                     help="Save model every n steps")
 parser.add_argument("--beta", default=0.0001, type=float,
                     help="PopArt parameter")
-parser.add_argument("--wandb", action="store_true",
+#parser.add_argument("--wandb", action="store_true",
+#                    help="Track the experiment on W&B")
+parser.add_argument("--wandb", nargs='?', const='', default='', type=str,
                     help="Track the experiment on W&B")
 
 # Test settings.
@@ -429,7 +433,7 @@ def learn(
                 stats["returns_by_game"][envs[i]] = stats["returns_by_game"].get(envs[i], [])[:9] + [r.item()]
             logging.info("returns by game:")
             logging.info(pprint.pformat(dict(returns_by_game)))
-            if flags.wandb:
+            if flags.wandb is not None:
                 try:
                     wandb.log({
                         **{f'returns/{k}': torch.tensor(v).mean().item() for k,v in returns_by_game.items()},
@@ -698,13 +702,16 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
         threads.append(thread)
 
     # W&B
-    if flags.wandb:
+    if flags.wandb is not None:
         wandb_run_id = None
-        slurm_job_id = os.environ.get('SLURM_JOB_ID')
-        if slurm_job_id is not None:
-            wandb_run_id = f'mila-slurm-{slurm_job_id}'
+        if flags.wandb != '':
+            wandb_run_id = flags.wandb
         else:
-            wandb_run_id = wandb.util.generate_id()
+            slurm_job_id = os.environ.get('SLURM_JOB_ID')
+            if slurm_job_id is not None:
+                wandb_run_id = f'mila-slurm-{slurm_job_id}'
+            else:
+                wandb_run_id = wandb.util.generate_id()
         wandb.init(project="monobeast", resume='allow', id=wandb_run_id, config=flags)
 
     def save_latest_model():
@@ -748,10 +755,10 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
             time.sleep(5)
             end_step = stats.get("step", 0)
 
-            if timer() - last_checkpoint_time > 10 * 60:
-                # save every 10 min.
-                save_latest_model()
-                last_checkpoint_time = timer()
+            #if timer() - last_checkpoint_time > 10 * 60:
+            #    # save every 10 min.
+            #    save_latest_model()
+            #    last_checkpoint_time = timer()
 
             if flags.save_model_every_nsteps > 0 and end_step >= last_savemodel_nsteps + flags.save_model_every_nsteps:
                 # save model every save_model_every_nsteps steps
