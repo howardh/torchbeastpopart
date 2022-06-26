@@ -431,8 +431,8 @@ def learn(
             for i,r in zip(batch['task'][batch['done']],batch["episode_return"][batch["done"]]):
                 returns_by_game[envs[i]].append(r.item())
                 stats["returns_by_game"][envs[i]] = stats["returns_by_game"].get(envs[i], [])[:9] + [r.item()]
-            logging.info("returns by game:")
-            logging.info(pprint.pformat(dict(returns_by_game)))
+            #logging.info("returns by game:")
+            #logging.info(pprint.pformat(dict(returns_by_game)))
             if flags.wandb is not None:
                 try:
                     wandb.log({
@@ -655,7 +655,7 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
         learner_model.load_state_dict(checkpoint_states["model_state_dict"])
         optimizer.load_state_dict(checkpoint_states["optimizer_state_dict"])
         scheduler.load_state_dict(checkpoint_states["scheduler_state_dict"])
-        stats = checkpoint_states["stats"]
+        stats = checkpoint_states.get("stats", {})
         logging.info(f"Resuming preempted job, current stats:\n{stats}")
 
     # Initialize actor model like learner model.
@@ -755,10 +755,10 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
             time.sleep(5)
             end_step = stats.get("step", 0)
 
-            #if timer() - last_checkpoint_time > 10 * 60:
-            #    # save every 10 min.
-            #    save_latest_model()
-            #    last_checkpoint_time = timer()
+            if timer() - last_checkpoint_time > 10 * 60:
+                # save every 10 min.
+                save_latest_model()
+                last_checkpoint_time = timer()
 
             if flags.save_model_every_nsteps > 0 and end_step >= last_savemodel_nsteps + flags.save_model_every_nsteps:
                 # save model every save_model_every_nsteps steps
@@ -777,7 +777,7 @@ def train(flags):  # pylint: disable=too-many-branches, too-many-statements
                 sps,
                 total_loss,
                 mean_return,
-                pprint.pformat({k:v for k,v in stats.items() if k not in ["returns_by_game"]}),
+                pprint.pformat({k:v for k,v in stats.items() if k not in ["returns_by_game","episode_returns"]}),
             )
             # Check stats for any finished episodes
         orion.client.report_results(data=[
